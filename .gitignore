@@ -1,0 +1,407 @@
+ gistfile1.txt
+import React, { useState, useRef, useEffect, useCallback } from "react";
+
+// ─────────────────────────────────────────────
+//  CONSTANTS
+// ─────────────────────────────────────────────
+const GRID = 1000;
+const MIN_ZOOM = 0.12;
+const MAX_ZOOM = 50;
+
+const PALETTE = [
+  "#e63946","#f4a261","#ffd166","#2a9d8f","#06d6a0",
+  "#118ab2","#6a4c93","#ef476f","#8ac926","#ffbe0b",
+  "#457b9d","#ffffff","#888888","#222222",
+];
+
+const SIZES = [
+  { n: 1,  label: "1 × 1",   price: 1   },
+  { n: 5,  label: "5 × 5",   price: 25  },
+  { n: 10, label: "10 × 10", price: 100 },
+];
+
+const PAY_METHODS = [
+  { id:"apple",  name:"Apple Pay",      icon:"🍎", bg:"#000000", fg:"#ffffff" },
+  { id:"google", name:"Google Pay",     icon:"G",  bg:"#ffffff", fg:"#111111", border:"1px solid #dddddd" },
+  { id:"paypal", name:"PayPal",         icon:"𝐏",  bg:"#003087", fg:"#ffffff" },
+  { id:"card",   name:"Carte bancaire", icon:"💳", bg:"#1c1c2e", fg:"#ffffff", border:"1px solid rgba(255,255,255,0.15)" },
+];
+
+const BOMBS = [
+  { id:"bomb",     name:"Bombe",      icon:"💣", radius:4, price:5,  color:"#FF6B35", desc:"Détruit une zone 4×4" },
+  { id:"megabomb", name:"Méga-Bombe", icon:"☢️", radius:8, price:30, color:"#FF3366", desc:"Détruit une zone 8×8" },
+];
+
+const STREAK_REWARDS = [1, 2, 3, 5, 7, 10, 15];
+
+const TUTO = [
+  { emoji:"🎨", color:"#e8504a", title:"Bienvenue sur PixelMarché !", desc:"Une toile d'un million de pixels à posséder. Chaque pixel vous appartient pour toujours, visible par tous les joueurs du monde entier.", tip:null, visual:"grid" },
+  { emoji:"👆", color:"#118ab2", title:"Tapez pour acheter", desc:"Touchez n'importe quelle case vide sur la grille. Une fiche s'ouvre pour choisir la taille, la couleur et le prix.", tip:"Pincez avec 2 doigts pour zoomer et trouver l'emplacement parfait !", visual:"tap" },
+  { emoji:"📐", color:"#6a4c93", title:"3 tailles disponibles", desc:"Choisissez la taille selon votre budget. Plus le bloc est grand, plus il est visible !", tip:null, visual:"sizes" },
+  { emoji:"🔗", color:"#2a9d8f", title:"Ajoutez votre lien", desc:"Chaque pixel peut pointer vers votre site ou réseau social. Les visiteurs cliquent directement dessus.", tip:"Tous les liens sont vérifiés par notre IA avant publication.", visual:"link" },
+  { emoji:"🛒", color:"#f4a261", title:"La boutique", desc:"Pixels gratuits, enchères, bombes… Accédez à des pouvoirs spéciaux depuis le bouton 🛒 en haut à droite.", tip:null, visual:"shop" },
+  { emoji:"🏆", color:"#ffd166", title:"Récompenses & Classement", desc:"Connectez-vous chaque jour pour gagner des pixels gratuits. Montez dans le classement mondial !", tip:"Jour 1 → 1 pixel · Jour 7 → 15 pixels gratuits !", visual:"rewards" },
+];
+
+// ─────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────
+function luhn(raw) {
+  let s = 0;
+  for (let i = 0; i < raw.length; i++) {
+    let d = +raw[raw.length - 1 - i];
+    if (i % 2 === 1) { d *= 2; if (d > 9) d -= 9; }
+    s += d;
+  }
+  return s % 10 === 0;
+}
+
+function cardInfo(raw) {
+  if (/^4/.test(raw))               return { name:"Visa",       icon:"💙", len:16, cvv:3 };
+  if (/^5[1-5]|^2[2-7]/.test(raw)) return { name:"Mastercard", icon:"🔴", len:16, cvv:3 };
+  if (/^3[47]/.test(raw))           return { name:"Amex",       icon:"💚", len:15, cvv:4 };
+  if (/^6/.test(raw))               return { name:"CB",         icon:"🟠", len:16, cvv:3 };
+  return null;
+}
+
+function validateCard(n, e, c) {
+  const raw = n.replace(/\s/g, "");
+  const errs = [];
+  const info = cardInfo(raw);
+  if (raw.length < 13)               errs.push("Numéro trop court");
+  else if (!luhn(raw))               errs.push("Numéro invalide (Luhn)");
+  if (info && raw.length !== info.len) errs.push(`${info.name} : ${info.len} chiffres requis`);
+  if (/^(.)\1+$/.test(raw))          errs.push("Chiffres identiques détectés");
+  if (e.length === 5) {
+    const [mm, yy] = e.split("/").map(Number);
+    if (mm < 1 || mm > 12) errs.push("Mois invalide");
+    if (new Date(2000 + yy, mm) < new Date()) errs.push("Carte expirée");
+  }
+  if (info && c.length > 0 && c.length !== info.cvv) errs.push(`CVV : ${info.cvv} chiffres pour ${info.name}`);
+  return { ok: errs.length === 0, errs, info };
+}
+
+async function moderateUrl(url) {
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 100,
+        system: "Modère les liens d'une plateforme de pixels. Refuse: adulte, phishing, malware, haine. Accepte: commercial, portfolio, blog. Réponds UNIQUEMENT en JSON sans markdown: {\"ok\":true,\"reason\":\"...\"}",
+        messages: [{ role: "user", content: `URL: ${url}` }],
+      }),
+    });
+    const d = await r.json();
+    return JSON.parse((d.content || []).map(c => c.text || "").join("").trim());
+  } catch (_) {
+    return { ok: true, reason: "Non vérifié" };
+  }
+}
+
+async function lbRead() {
+  try {
+    const r = await window.storage.get("pm_lb", true);
+    if (r) return JSON.parse(r.value);
+  } catch (_) {}
+  return {};
+}
+
+async function lbWrite(name, count) {
+  try {
+    const cur = await lbRead();
+    cur[name] = count;
+    await window.storage.set("pm_lb", JSON.stringify(cur), true);
+  } catch (_) {}
+}
+
+function today() { return new Date().toISOString().slice(0, 10); }
+
+// ─────────────────────────────────────────────
+//  GLOBAL CSS
+// ─────────────────────────────────────────────
+const CSS = `
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body { background: #080810; overflow: hidden; font-family: system-ui, sans-serif; }
+  input { font-family: inherit; background: transparent; color: #fff; border: none; outline: none; }
+  input::placeholder { color: rgba(255,255,255,0.25); }
+  button { font-family: inherit; cursor: pointer; border: none; outline: none; }
+  @keyframes fadeUp   { from { opacity:0; transform:translateY(12px) } to { opacity:1; transform:translateY(0) } }
+  @keyframes slideUp  { from { transform:translateY(100%) } to { transform:translateY(0) } }
+  @keyframes popIn    { from { opacity:0; transform:scale(0.88) } to { opacity:1; transform:scale(1) } }
+  @keyframes spin     { to { transform:rotate(360deg) } }
+  @keyframes toastIn  { from { opacity:0; transform:translateX(-50%) translateY(-10px) } to { opacity:1; transform:translateX(-50%) translateY(0) } }
+  @keyframes boom     { 0% { transform:scale(1); opacity:1 } 60% { transform:scale(3.5); opacity:.5 } 100% { transform:scale(0); opacity:0 } }
+  @keyframes rewardIn { 0% { transform:scale(0.5) rotate(-8deg); opacity:0 } 65% { transform:scale(1.1) rotate(2deg); opacity:1 } 100% { transform:scale(1) rotate(0deg); opacity:1 } }
+  @keyframes tutoIn   { from { opacity:0; transform:translateX(28px) } to { opacity:1; transform:translateX(0) } }
+  @keyframes tutoOut  { from { opacity:1; transform:translateX(0) } to { opacity:0; transform:translateX(-28px) } }
+  @keyframes floatUp  { 0%,100% { transform:translateY(0) } 50% { transform:translateY(-6px) } }
+`;
+
+// ─────────────────────────────────────────────
+//  LOGOS
+// ─────────────────────────────────────────────
+function LogoBanner() {
+  const rows = 19, cols = 14, cw = 14;
+  return (
+    <svg viewBox="0 0 320 220" style={{ maxWidth:"100%", height:60 }}>
+      <defs>
+        <filter id="lshadow">
+          <feDropShadow dx="2" dy="3" stdDeviation="5" floodColor="rgba(0,0,0,0.4)" />
+        </filter>
+      </defs>
+      <rect x="4" y="4" width="200" height="212" rx="6" fill="#f0eeeb" filter="url(#lshadow)" />
+      <rect x="12" y="12" width="184" height="196" fill="#e8504a" />
+      {Array.from({ length: rows }, (_, i) => (
+        <line key={"h" + i} x1="12" y1={12 + i * cw} x2="196" y2={12 + i * cw} stroke="#c0392b" strokeWidth="0.6" opacity="0.5" />
+      ))}
+      {Array.from({ length: cols }, (_, i) => (
+        <line key={"v" + i} x1={12 + i * cw} y1="12" x2={12 + i * cw} y2="208" stroke="#c0392b" strokeWidth="0.6" opacity="0.5" />
+      ))}
+      <rect x="68" y="54" width="110" height="140" fill="#222" />
+      <text x="214" y="68"  fontFamily="Georgia,serif" fontSize="34" fontWeight="700" fill="#e8504a" letterSpacing="-1">Pixel</text>
+      <text x="215" y="106" fontFamily="Georgia,serif" fontSize="30" fontWeight="400" fontStyle="italic" fill="#fff" opacity="0.9">Marché</text>
+      <line x1="214" y1="114" x2="314" y2="114" stroke="#e8504a" strokeWidth="1.5" opacity="0.3" />
+      <text x="215" y="132" fontFamily="'Courier New',monospace" fontSize="7" letterSpacing="2" fill="rgba(255,255,255,0.3)">UN MILLION DE PIXELS</text>
+    </svg>
+  );
+}
+
+function LogoMark({ size = 28 }) {
+  const c = 8.8;
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100">
+      <rect width="100" height="100" rx="18" fill="#f0eeeb" />
+      <rect x="6" y="6" width="88" height="88" fill="#e8504a" />
+      {Array.from({ length: 11 }, (_, i) => (
+        <line key={"h" + i} x1="6" y1={6 + i * c} x2="94" y2={6 + i * c} stroke="#c0392b" strokeWidth="0.6" opacity="0.5" />
+      ))}
+      {Array.from({ length: 11 }, (_, i) => (
+        <line key={"v" + i} x1={6 + i * c} y1="6" x2={6 + i * c} y2="94" stroke="#c0392b" strokeWidth="0.6" opacity="0.5" />
+      ))}
+      <rect x={6 + 2 * c} y={6 + 2 * c} width={5 * c} height={6 * c} fill="#222" />
+    </svg>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  ROOT
+// ─────────────────────────────────────────────
+export default function App() {
+  const [screen,  setScreen]  = useState("loading");
+  const [profile, setProfile] = useState(null);
+  const [streak,  setStreak]  = useState(null);
+  const [reward,  setReward]  = useState(null);
+  const [tuto,    setTuto]    = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const rp = await window.storage.get("pm10_profile");
+        if (rp) {
+          const p = JSON.parse(rp.value);
+          let s = { day: 1, last: today(), tokens: STREAK_REWARDS[0] };
+          try {
+            const rs = await window.storage.get("pm10_streak");
+            if (rs) {
+              s = JSON.parse(rs.value);
+              const t = today();
+              if (s.last !== t) {
+                const diff = Math.round((new Date(t) - new Date(s.last)) / 864e5);
+                s.day = diff === 1 ? Math.min(s.day + 1, STREAK_REWARDS.length) : 1;
+                const earned = STREAK_REWARDS[s.day - 1];
+                s.tokens = (s.tokens || 0) + earned;
+                s.last = t;
+                await window.storage.set("pm10_streak", JSON.stringify(s));
+                setReward({ day: s.day, earned, tokens: s.tokens });
+              }
+            }
+          } catch (_) {}
+          setStreak(s);
+          setProfile(p);
+          setScreen("grid");
+          return;
+        }
+      } catch (_) {}
+      setScreen("onboarding");
+    })();
+  }, []);
+
+  const doSave = async (p) => {
+    try { await window.storage.set("pm10_profile", JSON.stringify(p)); } catch (_) {}
+    const s = { day: 1, last: today(), tokens: STREAK_REWARDS[0] };
+    try { await window.storage.set("pm10_streak", JSON.stringify(s)); } catch (_) {}
+    setStreak(s);
+    setReward({ day: 1, earned: STREAK_REWARDS[0], tokens: STREAK_REWARDS[0] });
+    setTuto(true);
+    setProfile(p);
+    setScreen("grid");
+  };
+
+  const doLogout = async () => {
+    try { await window.storage.delete("pm10_profile"); } catch (_) {}
+    setProfile(null); setStreak(null); setScreen("onboarding");
+  };
+
+  const doTokenUpdate = async (n) => {
+    if (!streak) return;
+    const ns = { ...streak, tokens: n };
+    setStreak(ns);
+    try { await window.storage.set("pm10_streak", JSON.stringify(ns)); } catch (_) {}
+  };
+
+  return (
+    <React.Fragment>
+      <style>{CSS}</style>
+      {screen === "loading"    && <Loading />}
+      {screen === "onboarding" && <Onboarding onDone={doSave} />}
+      {screen === "grid"       && (
+        <Grid
+          profile={profile}
+          streak={streak}
+          onLogout={doLogout}
+          onTokenUpdate={doTokenUpdate}
+          onTuto={() => setTuto(true)}
+        />
+      )}
+      {reward && <DailyReward data={reward} onClose={() => setReward(null)} />}
+      {tuto   && <Tutorial onClose={() => setTuto(false)} />}
+    </React.Fragment>
+  );
+}
+
+function Loading() {
+  return (
+    <div style={{ width:"100vw", height:"100vh", background:"#080810", display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <Spinner />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+//  TUTORIAL
+// ─────────────────────────────────────────────
+function Tutorial({ onClose }) {
+  const [step, setStep] = useState(0);
+  const [anim, setAnim] = useState("in");
+  const cur = TUTO[step];
+  const last = step === TUTO.length - 1;
+
+  const go = (n) => {
+    setAnim("out");
+    setTimeout(() => { setStep(n); setAnim("in"); }, 180);
+  };
+
+  return (
+    <div style={{ position:"fixed", inset:0, zIndex:500, background:"rgba(4,4,16,0.93)", backdropFilter:"blur(8px)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"20px 18px" }}>
+      <button onClick={onClose} style={{ position:"absolute", top:16, right:16, background:"rgba(255,255,255,0.07)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:20, padding:"6px 15px", color:"rgba(255,255,255,0.45)", fontSize:12, fontWeight:600 }}>
+        Passer
+      </button>
+
+      <div style={{ display:"flex", gap:6, marginBottom:22 }}>
+        {TUTO.map((_, i) => (
+          <button key={i} onClick={() => go(i)} style={{ width: i === step ? 22 : 7, height:7, borderRadius:4, background: i === step ? cur.color : "rgba(255,255,255,0.2)", border:"none", padding:0, transition:"all 0.25s", cursor:"pointer" }} />
+        ))}
+      </div>
+
+      <div style={{ background:"#12121e", border:`1px solid ${cur.color}44`, borderRadius:22, padding:"24px 20px", maxWidth:360, width:"100%", boxShadow:`0 0 50px ${cur.color}15`, animation: anim === "in" ? "tutoIn 0.22s ease" : "tutoOut 0.16s ease" }}>
+        <TutoVisual type={cur.visual} color={cur.color} />
+        <div style={{ textAlign:"center", marginTop:20 }}>
+          <div style={{ fontSize:10, fontWeight:800, letterSpacing:2, color:cur.color, marginBottom:7, textTransform:"uppercase" }}>
+            Étape {step + 1} / {TUTO.length}
+          </div>
+          <div style={{ color:"#fff", fontSize:19, fontWeight:900, letterSpacing:-0.4, marginBottom:9, lineHeight:1.25 }}>
+            {cur.emoji} {cur.title}
+          </div>
+          <div style={{ color:"rgba(255,255,255,0.5)", fontSize:13, lineHeight:1.6 }}>
+            {cur.desc}
+          </div>
+          {cur.tip && (
+            <div style={{ marginTop:11, padding:"8px 12px", background:`${cur.color}15`, border:`1px solid ${cur.color}33`, borderRadius:10, color:cur.color, fontSize:12, fontStyle:"italic", lineHeight:1.45 }}>
+              💡 {cur.tip}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ display:"flex", gap:10, marginTop:18, width:"100%", maxWidth:360 }}>
+        {step > 0 && (
+          <button onClick={() => go(step - 1)} style={{ flex:1, padding:"13px", background:"rgba(255,255,255,0.07)", border:"1px solid rgba(255,255,255,0.13)", borderRadius:13, color:"rgba(255,255,255,0.55)", fontSize:14, fontWeight:700 }}>
+            ‹ Retour
+          </button>
+        )}
+        <button onClick={() => last ? onClose() : go(step + 1)} style={{ flex:2, padding:"13px", background:`linear-gradient(135deg,${cur.color},${cur.color}aa)`, border:"none", borderRadius:13, color:"#fff", fontSize:15, fontWeight:900, boxShadow:`0 4px 18px ${cur.color}44` }}>
+          {last ? "C'est parti ! 🚀" : "Suivant ›"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TutoVisual({ type, color }) {
+  const COLS = ["#e8504a","#ffd166","#06d6a0","#6a4c93","#118ab2","#f4a261","#ef476f","#8ac926"];
+  if (type === "grid") {
+    const filled = [0,2,5,7,8,11,14,17,20,22,25,28,30];
+    return (
+      <div style={{ display:"flex", justifyContent:"center" }}>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(8,1fr)", gap:3, animation:"floatUp 3s ease-in-out infinite" }}>
+          {Array.from({ length:32 }, (_, i) => (
+            <div key={i} style={{ width:28, height:28, borderRadius:5, background: filled.includes(i) ? COLS[i % COLS.length] : "rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.05)" }} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (type === "tap") {
+    return (
+      <div style={{ display:"flex", justifyContent:"center", alignItems:"center", gap:14 }}>
+        <div style={{ position:"relative" }}>
+          <div style={{ width:76, height:76, borderRadius:13, background:"rgba(255,255,255,0.06)", border:"2px solid rgba(255,255,255,0.1)", display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:2, padding:5 }}>
+            {Array.from({ length:16 }, (_, i) => (
+              <div key={i} style={{ borderRadius:3, background: i === 5 ? color : "rgba(255,255,255,0.05)" }} />
+            ))}
+          </div>
+          <div style={{ position:"absolute", bottom:-8, right:-8, fontSize:26, animation:"floatUp 1.5s ease-in-out infinite" }}>👆</div>
+        </div>
+        <div style={{ width:120, padding:"10px 11px", background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:12 }}>
+          <div style={{ color:"rgba(255,255,255,0.4)", fontSize:9, marginBottom:5 }}>Pixel (42, 77)</div>
+          <div style={{ display:"flex", gap:3, marginBottom:6 }}>
+            {["#e8504a","#ffd166","#06d6a0","#6a4c93"].map(c => (
+              <div key={c} style={{ width:16, height:16, borderRadius:4, background:c }} />
+            ))}
+          </div>
+          <div style={{ padding:"4px 8px", background:color, borderRadius:6, color:"#fff", fontSize:9, fontWeight:800, textAlign:"center" }}>1 €</div>
+        </div>
+      </div>
+    );
+  }
+  if (type === "sizes") {
+    return (
+      <div style={{ display:"flex", justifyContent:"center", alignItems:"flex-end", gap:16 }}>
+        {[{ w:30, label:"1×1",   price:"1€",   c:"#e8504a", d:"2s"   },
+          { w:56, label:"5×5",   price:"25€",  c:"#6a4c93", d:"2.3s" },
+          { w:80, label:"10×10", price:"100€", c:"#118ab2", d:"2.7s" }].map(item => (
+          <div key={item.label} style={{ textAlign:"center", animation:`floatUp ${item.d} ease-in-out infinite` }}>
+            <div style={{ width:item.w, height:item.w, borderRadius:Math.max(5, item.w * 0.12), background:item.c, margin:"0 auto 6px", boxShadow:`0 4px 14px ${item.c}55` }} />
+            <div style={{ color:"#fff", fontSize:11, fontWeight:800 }}>{item.label}</div>
+            <div style={{ color:"#ffd166", fontSize:10, fontWeight:700 }}>{item.price}</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (type === "link") {
+    return (
+      <div style={{ display:"flex", justifyContent:"center" }}>
+        <div style={{ width:"100%", maxWidth:230, padding:"12px 13px", background:"rgba(255,255,255,0.05)", borderRadius:14, border:"1px solid rgba(255,255,255,0.08)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:9, marginBottom:9 }}>
+            <div style={{ width:34, height:34, borderRadius:8, background:color, boxShadow:`0 2px 12px ${color}66`, flexShrink:0 }} />
+            <div>
+              <div style={{ color:"#fff", fontSize:12, fontWeight:700 }}>Mon Pixel</div>
+              <div style={{ color:"rgba(255,255,255,0.35)", fontSize:10 }}>{color}</div>
+            </div>
+          </div>
+          <div style={{ padding:"7px 9px", background:"rgba(6,214,160,0.1)", border:"1px solid rgba(6,214,160,0.25)", borderRadius:8, marginBottom:7 }}>
+            <div style={{ color:"rgba(255,255,255,0.3)", fontSize:9, marginBottom:2 }}>🔗 Lien vérifié</div>
+            <div style={{ color:"#06d6a0", fontSize:11 }}>https://mo
